@@ -305,6 +305,7 @@ struct PgStats {
 	usec_t xact_time;	/* total transaction time in us */
 	usec_t query_time;	/* total query time in us */
 	usec_t wait_time;	/* total time clients had to wait */
+	usec_t server_wait_time; /* total time PgBouncer had to wait for a server connection to be ready */ 
 
 	/* stats for prepared statements */
 	uint64_t ps_server_parse_count;

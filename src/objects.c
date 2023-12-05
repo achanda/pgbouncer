@@ -314,6 +314,7 @@ void change_server_state(PgSocket *server, SocketState newstate)
 		break;
 	case SV_LOGIN:
 		statlist_append(&pool->new_server_list, &server->head);
+		server->wait_start = get_cached_time();
 		break;
 	case SV_USED:
 		/* use LIFO */
@@ -1451,6 +1452,8 @@ static void connect_server(struct PgSocket *server, const struct sockaddr *sa, i
 {
 	bool res;
 
+	Assert(server->wait_start > 0);
+
 	/* fill remote_addr */
 	memset(&server->remote_addr, 0, sizeof(server->remote_addr));
 	if (sa->sa_family == AF_UNIX) {
@@ -1466,6 +1469,9 @@ static void connect_server(struct PgSocket *server, const struct sockaddr *sa, i
 			   cf_server_connect_timeout / USEC);
 	if (!res)
 		log_noise("failed to launch new connection");
+
+	/* acount for time client spent waiting for server */
+	server->pool->stats.server_wait_time += (get_cached_time() - server->wait_start);
 }
 
 static void dns_callback(void *arg, const struct sockaddr *sa, int salen)

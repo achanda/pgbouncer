@@ -30,6 +30,7 @@ static void reset_stats(PgStats *stat)
 	stat->xact_count = 0;
 	stat->xact_time = 0;
 	stat->wait_time = 0;
+	stat->server_wait_time = 0;
 
 	stat->ps_client_parse_count = 0;
 	stat->ps_server_parse_count = 0;
@@ -45,6 +46,7 @@ static void stat_add(PgStats *total, PgStats *stat)
 	total->xact_count += stat->xact_count;
 	total->xact_time += stat->xact_time;
 	total->wait_time += stat->wait_time;
+	total->server_wait_time += stat->server_wait_time;
 
 	total->ps_client_parse_count += stat->ps_client_parse_count;
 	total->ps_server_parse_count += stat->ps_server_parse_count;
@@ -82,6 +84,7 @@ static void calc_average(PgStats *avg, PgStats *cur, PgStats *old)
 		avg->xact_time = (cur->xact_time - old->xact_time) / xact_count;
 
 	avg->wait_time = USEC * (cur->wait_time - old->wait_time) / dur;
+	avg->server_wait_time = USEC * (cur->server_wait_time - old->server_wait_time) / dur;
 
 	ps_client_parse_count = cur->ps_client_parse_count - old->ps_client_parse_count;
 	ps_server_parse_count = cur->ps_server_parse_count - old->ps_server_parse_count;
@@ -96,7 +99,7 @@ static void write_stats(PktBuf *buf, PgStats *stat, PgStats *old, char *dbname)
 {
 	PgStats avg;
 	calc_average(&avg, stat, old);
-	pktbuf_write_DataRow(buf, "sNNNNNNNNNNNNNN", dbname,
+	pktbuf_write_DataRow(buf, "sNNNNNNNNNNNNNNN", dbname,
 			     stat->xact_count, stat->query_count,
 			     stat->client_bytes, stat->server_bytes,
 			     stat->xact_time, stat->query_time,
@@ -104,7 +107,7 @@ static void write_stats(PktBuf *buf, PgStats *stat, PgStats *old, char *dbname)
 			     avg.xact_count, avg.query_count,
 			     avg.client_bytes, avg.server_bytes,
 			     avg.xact_time, avg.query_time,
-			     avg.wait_time);
+			     avg.wait_time, avg.server_wait_time);
 }
 
 bool admin_database_stats(PgSocket *client, struct StatList *pool_list)
@@ -126,7 +129,7 @@ bool admin_database_stats(PgSocket *client, struct StatList *pool_list)
 		return true;
 	}
 
-	pktbuf_write_RowDescription(buf, "sNNNNNNNNNNNNNN", "database",
+	pktbuf_write_RowDescription(buf, "sNNNNNNNNNNNNNNN", "database",
 				    "total_xact_count", "total_query_count",
 				    "total_received", "total_sent",
 				    "total_xact_time", "total_query_time",
@@ -134,7 +137,7 @@ bool admin_database_stats(PgSocket *client, struct StatList *pool_list)
 				    "avg_xact_count", "avg_query_count",
 				    "avg_recv", "avg_sent",
 				    "avg_xact_time", "avg_query_time",
-				    "avg_wait_time");
+				    "avg_wait_time", "avg_server_wait_time");
 	statlist_for_each(item, pool_list) {
 		pool = container_of(item, PgPool, head);
 
@@ -168,11 +171,11 @@ static void write_stats_totals(PktBuf *buf, PgStats *stat, PgStats *old, char *d
 {
 	PgStats avg;
 	calc_average(&avg, stat, old);
-	pktbuf_write_DataRow(buf, "sNNNNNNN", dbname,
+	pktbuf_write_DataRow(buf, "sNNNNNNNN", dbname,
 			     stat->xact_count, stat->query_count,
 			     stat->client_bytes, stat->server_bytes,
 			     stat->xact_time, stat->query_time,
-			     stat->wait_time);
+			     stat->wait_time, stat->server_wait_time);
 }
 
 bool admin_database_stats_totals(PgSocket *client, struct StatList *pool_list)
@@ -194,11 +197,11 @@ bool admin_database_stats_totals(PgSocket *client, struct StatList *pool_list)
 		return true;
 	}
 
-	pktbuf_write_RowDescription(buf, "sNNNNNNN", "database",
+	pktbuf_write_RowDescription(buf, "sNNNNNNNN", "database",
 				    "xact_count", "query_count",
 				    "bytes_received", "bytes_sent",
 				    "xact_time", "query_time",
-				    "wait_time");
+				    "wait_time", "server_wait_time");;
 	statlist_for_each(item, pool_list) {
 		pool = container_of(item, PgPool, head);
 
@@ -232,11 +235,11 @@ static void write_stats_averages(PktBuf *buf, PgStats *stat, PgStats *old, char 
 {
 	PgStats avg;
 	calc_average(&avg, stat, old);
-	pktbuf_write_DataRow(buf, "sNNNNNNN", dbname,
+	pktbuf_write_DataRow(buf, "sNNNNNNNN", dbname,
 			     avg.xact_count, avg.query_count,
 			     avg.client_bytes, avg.server_bytes,
 			     avg.xact_time, avg.query_time,
-			     avg.wait_time);
+			     avg.wait_time, avg.server_wait_time);
 }
 
 bool admin_database_stats_averages(PgSocket *client, struct StatList *pool_list)
@@ -258,11 +261,11 @@ bool admin_database_stats_averages(PgSocket *client, struct StatList *pool_list)
 		return true;
 	}
 
-	pktbuf_write_RowDescription(buf, "sNNNNNNN", "database",
+	pktbuf_write_RowDescription(buf, "sNNNNNNNN", "database",
 				    "xact_count", "query_count",
 				    "bytes_received", "bytes_sent",
 				    "xact_time", "query_time",
-				    "wait_time");
+				    "wait_time", "server_wait_time");
 	statlist_for_each(item, pool_list) {
 		pool = container_of(item, PgPool, head);
 
@@ -336,6 +339,7 @@ bool show_stat_totals(PgSocket *client, struct StatList *pool_list)
 	WAVG(xact_time);
 	WAVG(query_time);
 	WAVG(wait_time);
+	WAVG(server_wait_time);
 
 	admin_flush(client, buf, "SHOW");
 	return true;
@@ -377,7 +381,8 @@ static void refresh_stats(evutil_socket_t s, short flags, void *arg)
 			 " out %" PRIu64 " B/s,"
 			 " xact %" PRIu64 " us,"
 			 " query %" PRIu64 " us,"
-			 " wait %" PRIu64 " us",
+			 " wait %" PRIu64 " us,"
+			 " server wait %" PRIu64 " us",
 			 avg.xact_count,
 			 avg.query_count,
 			 avg.ps_client_parse_count,
@@ -385,7 +390,7 @@ static void refresh_stats(evutil_socket_t s, short flags, void *arg)
 			 avg.ps_bind_count,
 			 avg.client_bytes, avg.server_bytes,
 			 avg.xact_time, avg.query_time,
-			 avg.wait_time);
+			 avg.wait_time, avg.server_wait_time);
 	}
 
 	sd_notifyf(0,
@@ -398,7 +403,8 @@ static void refresh_stats(evutil_socket_t s, short flags, void *arg)
 		   " out %" PRIu64 " B/s,"
 		   " xact %" PRIu64 " μs,"
 		   " query %" PRIu64 " μs,"
-		   " wait %" PRIu64 " μs",
+		   " wait %" PRIu64 " μs,"
+		   " server wait %" PRIu64 " us",
 		   avg.xact_count,
 		   avg.query_count,
 		   avg.ps_client_parse_count,
@@ -406,7 +412,7 @@ static void refresh_stats(evutil_socket_t s, short flags, void *arg)
 		   avg.ps_bind_count,
 		   avg.client_bytes, avg.server_bytes,
 		   avg.xact_time, avg.query_time,
-		   avg.wait_time);
+		   avg.wait_time, avg.server_wait_time);
 }
 
 void stats_setup(void)
