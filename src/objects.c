@@ -1251,16 +1251,33 @@ bool release_server(PgSocket *server)
 		return false;
 	}
 
-	if (statlist_count(&server->outstanding_requests) > 0) {
-		/*
-		 * We can't release the server if there are outstanding requests
-		 * that haven't been responded to yet, otherwise the server
-		 * might get linked to another client and it will get those
-		 * responses when it does not expect them. To be on the safe
-		 * side we simply close this connection.
-		 */
-		disconnect_server(server, true, "client disconnected with queries in progress");
-		return true;
+	/*
+	 * Clean up the transaction after client disconnect
+	 */
+	if (server->idle_tx || statlist_count(&server->outstanding_requests) > 0) {
+		bool res = true;
+		slog_info(server, "cleaning up transaction after client disconnect");
+
+		/* Clear all outstanding requests if any */
+		if (statlist_count(&server->outstanding_requests) > 0) {
+			if (!clear_outstanding_requests_until(server, (char[]) {'\0'})) {
+				disconnect_server(server, true, "failed to clear outstanding requests");
+				return false;
+			}
+		}
+
+		/* Send a rollback command to clean up any open transaction */
+		if (server->idle_tx) {
+			SEND_generic(res, server, PqMsg_Query, "s", "ROLLBACK");
+			if (!res) {
+				disconnect_server(server, true, "failed to send rollback after client disconnect");
+				return false;
+			}
+			server->idle_tx = false;
+		}
+
+		/* Set the server to be tested before reuse */
+		newstate = SV_TESTED;
 	}
 
 	/* enforce close request */
