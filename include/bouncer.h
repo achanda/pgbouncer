@@ -345,6 +345,7 @@ struct PgStats {
 struct PgPool {
 	struct List head;			/* entry in global pool_list */
 	struct List map_head;			/* entry in user->pool_list */
+	struct List active_head;		/* entry in active_pool_list */
 
 	PgDatabase *db;			/* corresponding database */
 	/*

@@ -39,6 +39,10 @@
 #include <sys/resource.h>
 #endif
 
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
 /*
  * Default number of iterations when generating secret.  Should be at least
  * 4096 per RFC 7677.
@@ -884,20 +888,29 @@ static void main_loop_once(void)
 
 	reset_time_cache();
 
-	err = event_base_loop(pgb_event_base, EVLOOP_ONCE);
+	/* Use non-blocking loop for better performance */
+	err = event_base_loop(pgb_event_base, EVLOOP_NONBLOCK);
 	if (err < 0) {
 		if (errno != EINTR)
 			log_warning("event_loop failed: %s", strerror(errno));
 	}
+
+	/* If no events were processed, add a small delay to prevent busy-waiting */
+	if (err == 1) {  /* EVLOOP_NONBLOCK returns 1 when no events were ready */
+		/* Small sleep to prevent CPU spinning when idle */
+		usleep(1000); /* 1ms */
+	}
+
+	/* Lightweight per-loop operations only */
 	ldap_poll();
 	pam_poll();
-	per_loop_maint();
 	reuse_just_freed_objects();
 	rescue_timers();
 	per_loop_pooler_maint();
 
 	if (adns)
 		adns_per_loop(adns);
+	/* per_loop_maint() is now called via timer, see janitor_setup() */
 }
 
 static void takeover_part1(void)
