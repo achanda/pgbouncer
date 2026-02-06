@@ -53,6 +53,12 @@ bool strlist_contains(const char *liststr, const char *str);
 void fill_remote_addr(PgSocket *sk, int fd, bool is_unix);
 void fill_local_addr(PgSocket *sk, int fd, bool is_unix);
 
+/*
+ * Check if the socket is still connected (peer has not closed the connection).
+ * Returns false if the connection appears to be closed (e.g. POLLHUP).
+ * Used for client_connection_check_interval.
+ */
+bool client_socket_still_connected(int fd);
 
 void rescue_timers(void);
 void safe_evtimer_add(struct event *ev, struct timeval *tv);

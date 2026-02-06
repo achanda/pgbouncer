@@ -758,6 +758,19 @@ will be disconnected. Mainly needed to avoid dead connections stalling
 
 Default: 60.0
 
+### client_connection_check_interval
+
+When set to a positive value (milliseconds), PgBouncer periodically checks
+that active client connections (those with a server and a query in progress)
+are still connected. If the kernel reports that the connection is closed
+(e.g. the client exited or the network dropped), the client is disconnected
+so that the server connection can be released back to the pool sooner.
+
+This is similar to PostgreSQL's `client_connection_check_interval`. A value
+of 0 disables the check (default). [milliseconds]
+
+Default: 0 (disabled)
+
 ### autodb_idle_timeout
 
 If the automatically created (via "*") database pools have

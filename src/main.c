@@ -167,6 +167,7 @@ usec_t cf_query_wait_timeout;
 usec_t cf_cancel_wait_timeout;
 usec_t cf_client_idle_timeout;
 usec_t cf_client_login_timeout;
+int cf_client_connection_check_interval;
 usec_t cf_idle_transaction_timeout;
 usec_t cf_transaction_timeout;
 usec_t cf_suspend_timeout;
@@ -273,6 +274,7 @@ static const struct CfKey bouncer_params [] = {
 	CF_ABS("cancel_wait_timeout", CF_TIME_USEC, cf_cancel_wait_timeout, 0, "10"),
 	CF_ABS("client_idle_timeout", CF_TIME_USEC, cf_client_idle_timeout, 0, "0"),
 	CF_ABS("client_login_timeout", CF_TIME_USEC, cf_client_login_timeout, 0, "60"),
+	CF_ABS("client_connection_check_interval", CF_INT, cf_client_connection_check_interval, 0, "0"),
 	CF_ABS("client_tls13_ciphers", CF_STR, cf_client_tls13_ciphers, 0, NULL),
 	CF_ABS("client_tls_ca_file", CF_STR, cf_client_tls_ca_file, 0, ""),
 	CF_ABS("client_tls_cert_file", CF_STR, cf_client_tls_cert_file, 0, ""),
