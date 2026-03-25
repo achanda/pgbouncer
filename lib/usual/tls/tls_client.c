@@ -38,6 +38,223 @@ struct tls *tls_client(void)
 	return (ctx);
 }
 
+bool tls_config_has_shared_client_context(struct tls_config *config)
+{
+	return config != NULL && config->client_runtime != NULL;
+}
+
+static void tls_client_session_free(struct tls_client_session *session)
+{
+	if (session == NULL)
+		return;
+
+	free(session->cache_key);
+	SSL_SESSION_free(session->session);
+	free(session);
+}
+
+static int tls_client_new_session_cb(SSL *ssl, SSL_SESSION *session)
+{
+	struct tls *ctx = SSL_get_app_data(ssl);
+	SSL_SESSION *cached_session;
+
+	(void)session;
+
+	if (ctx == NULL || ctx->client_runtime == NULL || ctx->session_cache_key == NULL)
+		return 1;
+
+	cached_session = SSL_get1_session(ssl);
+	if (cached_session == NULL)
+		return 1;
+
+	if (!tls_client_runtime_store_session(ctx->client_runtime,
+					      ctx->session_cache_key,
+					      cached_session)) {
+		SSL_SESSION_free(cached_session);
+	}
+
+	return 1;
+}
+
+void tls_client_runtime_ref(struct tls_client_runtime *runtime)
+{
+	if (runtime == NULL)
+		return;
+
+	runtime->refcount++;
+}
+
+void tls_client_runtime_unref(struct tls_client_runtime *runtime)
+{
+	struct tls_client_session *session;
+	struct tls_client_session *next;
+
+	if (runtime == NULL)
+		return;
+
+	Assert(runtime->refcount > 0);
+	if (--runtime->refcount != 0)
+		return;
+
+	for (session = runtime->sessions; session != NULL; session = next) {
+		next = session->next;
+		tls_client_session_free(session);
+	}
+
+	SSL_CTX_free(runtime->ssl_ctx);
+	free(runtime);
+}
+
+SSL_SESSION *tls_client_runtime_get_session(struct tls_client_runtime *runtime,
+					    const char *cache_key)
+{
+	struct tls_client_session *session;
+
+	if (runtime == NULL || cache_key == NULL)
+		return NULL;
+
+	for (session = runtime->sessions; session != NULL; session = session->next) {
+		if (strcmp(session->cache_key, cache_key) == 0)
+			return session->session;
+	}
+
+	return NULL;
+}
+
+bool tls_client_runtime_store_session(struct tls_client_runtime *runtime,
+				      const char *cache_key,
+				      SSL_SESSION *ssl_session)
+{
+	struct tls_client_session *session;
+
+	if (runtime == NULL || cache_key == NULL || ssl_session == NULL)
+		return false;
+
+	for (session = runtime->sessions; session != NULL; session = session->next) {
+		if (strcmp(session->cache_key, cache_key) == 0) {
+			SSL_SESSION_free(session->session);
+			session->session = ssl_session;
+			return true;
+		}
+	}
+
+	session = calloc(1, sizeof(*session));
+	if (session == NULL)
+		return false;
+
+	session->cache_key = strdup(cache_key);
+	if (session->cache_key == NULL) {
+		free(session);
+		return false;
+	}
+
+	session->session = ssl_session;
+	session->next = runtime->sessions;
+	runtime->sessions = session;
+
+	return true;
+}
+
+void tls_client_cache_session(struct tls *ctx)
+{
+	SSL_SESSION *ssl_session;
+
+	if (ctx == NULL || ctx->ssl_conn == NULL || ctx->client_runtime == NULL ||
+	    ctx->session_cache_key == NULL)
+		return;
+
+	ssl_session = SSL_get1_session(ctx->ssl_conn);
+	if (ssl_session == NULL)
+		return;
+
+	if (!tls_client_runtime_store_session(ctx->client_runtime,
+					      ctx->session_cache_key,
+					      ssl_session)) {
+		SSL_SESSION_free(ssl_session);
+	}
+}
+
+static int tls_client_build_session_cache_key(int fd,
+					      const char *servername,
+					      char **cache_key)
+{
+	struct sockaddr_storage ss;
+	socklen_t ss_len = sizeof(ss);
+	char peerbuf[128];
+	const char *peer = NULL;
+
+	*cache_key = NULL;
+
+	if (getpeername(fd, (struct sockaddr *)&ss, &ss_len) == 0)
+		peer = sa2str((struct sockaddr *)&ss, peerbuf, sizeof(peerbuf));
+
+	if (peer == NULL)
+		peer = "<unknown>";
+
+	if (servername != NULL) {
+		if (asprintf(cache_key, "%s|%s", peer, servername) == -1)
+			return -1;
+		return 0;
+	}
+
+	*cache_key = strdup(peer);
+	return *cache_key != NULL ? 0 : -1;
+}
+
+static int tls_client_prepare_runtime(struct tls *ctx)
+{
+	struct tls_client_runtime *runtime;
+	SSL_CTX *ssl_ctx = NULL;
+
+	runtime = ctx->config->client_runtime;
+	if (runtime == NULL) {
+		if ((ssl_ctx = SSL_CTX_new(SSLv23_client_method())) == NULL) {
+			tls_set_errorx(ctx, "ssl context failure");
+			goto err;
+		}
+
+		ctx->ssl_ctx = ssl_ctx;
+		if (tls_configure_ssl(ctx) != 0)
+			goto err;
+		if (tls_configure_keypair(ctx, ssl_ctx, ctx->config->keypair, 0) != 0)
+			goto err;
+		if (ctx->config->verify_cert &&
+		    tls_configure_ssl_verify(ctx, SSL_VERIFY_PEER) == -1)
+			goto err;
+		if (SSL_CTX_set_tlsext_status_cb(ssl_ctx,
+						 tls_ocsp_verify_callback) != 1) {
+			tls_set_errorx(ctx, "ssl OCSP verification setup failure");
+			goto err;
+		}
+
+		SSL_CTX_set_session_cache_mode(ssl_ctx, SSL_SESS_CACHE_CLIENT);
+		SSL_CTX_sess_set_new_cb(ssl_ctx, tls_client_new_session_cb);
+
+		runtime = calloc(1, sizeof(*runtime));
+		if (runtime == NULL) {
+			tls_set_errorx(ctx, "out of memory");
+			goto err;
+		}
+
+		runtime->ssl_ctx = ssl_ctx;
+		runtime->refcount = 1;
+		ctx->config->client_runtime = runtime;
+		ctx->ssl_ctx = NULL;
+	}
+
+	tls_client_runtime_ref(runtime);
+	ctx->client_runtime = runtime;
+	ctx->ssl_ctx = runtime->ssl_ctx;
+	ctx->shared_ssl_ctx = true;
+
+	return 0;
+
+err:
+	SSL_CTX_free(ssl_ctx);
+	ctx->ssl_ctx = NULL;
+	return -1;
+}
+
 int tls_connect(struct tls *ctx, const char *host, const char *port)
 {
 	return tls_connect_servername(ctx, host, port, NULL);
@@ -178,14 +395,7 @@ int tls_connect_fds(struct tls *ctx, int fd_read, int fd_write,
 		}
 	}
 
-	if ((ctx->ssl_ctx = SSL_CTX_new(SSLv23_client_method())) == NULL) {
-		tls_set_errorx(ctx, "ssl context failure");
-		goto err;
-	}
-
-	if (tls_configure_ssl(ctx) != 0)
-		goto err;
-	if (tls_configure_keypair(ctx, ctx->ssl_ctx, ctx->config->keypair, 0) != 0)
+	if (tls_client_prepare_runtime(ctx) != 0)
 		goto err;
 
 	if (ctx->config->verify_name) {
@@ -193,15 +403,6 @@ int tls_connect_fds(struct tls *ctx, int fd_read, int fd_write,
 			tls_set_errorx(ctx, "server name not specified");
 			goto err;
 		}
-	}
-
-	if (ctx->config->verify_cert &&
-	    (tls_configure_ssl_verify(ctx, SSL_VERIFY_PEER) == -1))
-		goto err;
-
-	if (SSL_CTX_set_tlsext_status_cb(ctx->ssl_ctx, tls_ocsp_verify_callback) != 1) {
-		tls_set_errorx(ctx, "ssl OCSP verification setup failure");
-		goto err;
 	}
 
 	if ((ctx->ssl_conn = SSL_new(ctx->ssl_ctx)) == NULL) {
@@ -220,6 +421,16 @@ int tls_connect_fds(struct tls *ctx, int fd_read, int fd_write,
 	if (SSL_set_tlsext_status_type(ctx->ssl_conn, TLSEXT_STATUSTYPE_ocsp) != 1) {
 		tls_set_errorx(ctx, "ssl OCSP extension setup failure");
 		goto err;
+	}
+
+	if (tls_client_build_session_cache_key(fd_read, servername,
+					       &ctx->session_cache_key) == 0) {
+		SSL_SESSION *ssl_session;
+
+		ssl_session = tls_client_runtime_get_session(ctx->client_runtime,
+							     ctx->session_cache_key);
+		if (ssl_session != NULL)
+			SSL_set_session(ctx->ssl_conn, ssl_session);
 	}
 
 	/*
@@ -274,6 +485,7 @@ int tls_handshake_client(struct tls *ctx)
 		}
 	}
 
+	tls_client_cache_session(ctx);
 	ctx->state |= TLS_HANDSHAKE_COMPLETE;
 	rv = 0;
 

@@ -1,8 +1,12 @@
+import socket
+import ssl
+import struct
 import subprocess
 import time
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from .utils import (
     DIRECT_TLS_SUPPORT,
@@ -23,6 +27,8 @@ if not TLS_SUPPORT:
 # using psycopg. The reason for this is that psycopg has a bug on Apple
 # silicon when enabling SSL: https://github.com/psycopg/psycopg/discussions/270
 
+SSL_REQUEST = struct.pack("!II", 8, 80877103)
+
 
 # replace regular bouncer fixture with one that uses the special SSL config
 @pytest.fixture
@@ -36,6 +42,24 @@ async def bouncer_tls(pg, tmp_path):
     yield bouncer_tls
 
     await bouncer_tls.cleanup()
+
+
+def open_tls_socket(port, ssl_context, session=None):
+    raw_sock = socket.create_connection(("127.0.0.1", port))
+    raw_sock.sendall(SSL_REQUEST)
+    assert raw_sock.recv(1) == b"S"
+
+    try:
+        if session is None:
+            return ssl_context.wrap_socket(raw_sock, server_hostname="localhost")
+        return ssl_context.wrap_socket(
+            raw_sock,
+            server_hostname="localhost",
+            session=session,
+        )
+    except TypeError:
+        raw_sock.close()
+        pytest.skip("Python ssl module does not support explicit TLS sessions")
 
 
 def test_server_ssl(pg, bouncer_tls, cert_dir):
@@ -167,6 +191,38 @@ def test_client_ssl(bouncer_tls, cert_dir):
     bouncer_tls.admin(f"set client_tls_ca_file = '{root}'")
     bouncer_tls.admin(f"set client_tls_sslmode = require")
     bouncer_tls.psql_test(host="localhost", sslmode="require")
+
+
+def test_client_tls_session_resumption(bouncer_tls, cert_dir):
+    if not hasattr(ssl.SSLSocket, "session") or not hasattr(
+        ssl.SSLSocket, "session_reused"
+    ):
+        pytest.skip("Python ssl module does not expose TLS session state")
+
+    root = cert_dir / "TestCA1" / "ca.crt"
+    key = cert_dir / "TestCA1" / "sites" / "01-localhost.key"
+    cert = cert_dir / "TestCA1" / "sites" / "01-localhost.crt"
+    bouncer_tls.admin(f"set client_tls_key_file = '{key}'")
+    bouncer_tls.admin(f"set client_tls_cert_file = '{cert}'")
+    bouncer_tls.admin(f"set client_tls_ca_file = '{root}'")
+    bouncer_tls.admin("set client_tls_protocols = 'tlsv1.2'")
+    bouncer_tls.admin("set client_tls_sslmode = require")
+
+    ssl_context = ssl.create_default_context(cafile=str(root))
+
+    first = open_tls_socket(bouncer_tls.port, ssl_context)
+    try:
+        assert not first.session_reused
+        session = first.session
+        assert session is not None
+    finally:
+        first.close()
+
+    second = open_tls_socket(bouncer_tls.port, ssl_context, session=session)
+    try:
+        assert second.session_reused
+    finally:
+        second.close()
 
 
 def test_client_ssl_set_enable_disable(bouncer_tls, cert_dir):
@@ -380,6 +436,51 @@ def test_ssl_replication(pg, bouncer_tls, cert_dir):
     # physical rep
     connect_args["replication"] = "true"
     bouncer_tls.psql("IDENTIFY_SYSTEM", **connect_args)
+
+
+def test_server_tls_session_resumption(pg, bouncer_tls, cert_dir):
+    bouncer_tls.admin("set server_tls_protocols = 'tlsv1.2'")
+    bouncer_tls.admin("set server_tls_sslmode = require")
+    pg.ssl_access("all", "trust")
+    pg.configure("ssl=on")
+    root = cert_dir / "TestCA1" / "ca.crt"
+    pg.configure(f"ssl_ca_file='{root}'")
+    if PG_MAJOR_VERSION < 10 or WINDOWS:
+        pg.restart()
+    else:
+        pg.reload()
+
+    ssl_context = ssl.create_default_context(cafile=str(root))
+    first = open_tls_socket(pg.port, ssl_context)
+    try:
+        session = first.session
+    finally:
+        first.close()
+
+    second = open_tls_socket(pg.port, ssl_context, session=session)
+    try:
+        if not second.session_reused:
+            pytest.skip(
+                "PostgreSQL backend does not support direct TLS resumption here"
+            )
+    finally:
+        second.close()
+
+    bouncer_tls.test()
+    servers = bouncer_tls.admin("SHOW SERVERS", row_factory=dict_row)
+    assert any(
+        server["database"] == "p0"
+        and server["tls"].startswith("TLSv1.2/")
+        and "/resumed" not in server["tls"]
+        for server in servers
+    )
+
+    bouncer_tls.admin("RECONNECT")
+    bouncer_tls.test()
+    servers = bouncer_tls.admin("SHOW SERVERS", row_factory=dict_row)
+    assert any(
+        server["database"] == "p0" and "/resumed" in server["tls"] for server in servers
+    )
 
 
 def test_servers_no_disconnect_on_reload_with_no_tls_change(bouncer_tls, pg, cert_dir):

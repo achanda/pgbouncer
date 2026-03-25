@@ -1322,6 +1322,14 @@ bool sbuf_tls_setup(void)
 			       cf_server_tls_key_file, cf_server_tls_cert_file,
 			       cf_server_tls_ca_file, "", "", true))
 			goto failed;
+
+		if (server_connect_conf != NULL &&
+		    server_connect_sslmode == cf_server_tls_sslmode &&
+		    tls_config_equal(new_server_connect_conf, server_connect_conf)) {
+			log_info("reusing cached server TLS client context");
+			tls_config_free(new_server_connect_conf);
+			new_server_connect_conf = server_connect_conf;
+		}
 	}
 
 	if (cf_client_tls_sslmode != SSLMODE_DISABLED) {
@@ -1338,15 +1346,25 @@ bool sbuf_tls_setup(void)
 			       cf_client_tls_ecdhecurve, false))
 			goto failed;
 
-		new_client_accept_base = tls_server();
-		if (!new_client_accept_base) {
-			log_error("server_base failed");
-			goto failed;
-		}
-		err = tls_configure(new_client_accept_base, new_client_accept_conf);
-		if (err) {
-			log_error("TLS setup failed: %s", tls_error(new_client_accept_base));
-			goto failed;
+		if (client_accept_conf != NULL &&
+		    client_accept_base != NULL &&
+		    client_accept_sslmode == cf_client_tls_sslmode &&
+		    tls_config_equal(new_client_accept_conf, client_accept_conf)) {
+			log_info("reusing cached client TLS accept context");
+			tls_config_free(new_client_accept_conf);
+			new_client_accept_conf = client_accept_conf;
+			new_client_accept_base = client_accept_base;
+		} else {
+			new_client_accept_base = tls_server();
+			if (!new_client_accept_base) {
+				log_error("server_base failed");
+				goto failed;
+			}
+			err = tls_configure(new_client_accept_base, new_client_accept_conf);
+			if (err) {
+				log_error("TLS setup failed: %s", tls_error(new_client_accept_base));
+				goto failed;
+			}
 		}
 	}
 
@@ -1366,9 +1384,12 @@ bool sbuf_tls_setup(void)
 		}
 	}
 
-	usual_tls_free(client_accept_base);
-	tls_config_free(client_accept_conf);
-	tls_config_free(server_connect_conf);
+	if (client_accept_base != new_client_accept_base)
+		usual_tls_free(client_accept_base);
+	if (client_accept_conf != new_client_accept_conf)
+		tls_config_free(client_accept_conf);
+	if (server_connect_conf != new_server_connect_conf)
+		tls_config_free(server_connect_conf);
 	client_accept_base = new_client_accept_base;
 	client_accept_conf = new_client_accept_conf;
 	client_accept_sslmode = cf_client_tls_sslmode;
@@ -1376,9 +1397,12 @@ bool sbuf_tls_setup(void)
 	server_connect_sslmode = cf_server_tls_sslmode;
 	return true;
 failed:
-	usual_tls_free(new_client_accept_base);
-	tls_config_free(new_client_accept_conf);
-	tls_config_free(new_server_connect_conf);
+	if (new_client_accept_base != client_accept_base)
+		usual_tls_free(new_client_accept_base);
+	if (new_client_accept_conf != client_accept_conf)
+		tls_config_free(new_client_accept_conf);
+	if (new_server_connect_conf != server_connect_conf)
+		tls_config_free(new_server_connect_conf);
 	return false;
 }
 
@@ -1461,6 +1485,10 @@ bool sbuf_tls_connect(SBuf *sbuf, const char *hostname)
 		log_error("tls client config failed: %s", tls_error(ctls));
 		usual_tls_free(ctls);
 		return false;
+	}
+	if (tls_config_has_shared_client_context(server_connect_conf)) {
+		log_info("reusing cached server TLS client context for %s",
+			 hostname ? hostname : "(no hostname)");
 	}
 
 	sbuf->tls = ctls;
