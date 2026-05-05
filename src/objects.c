@@ -242,6 +242,8 @@ void change_client_state(PgSocket *client, SocketState newstate)
 	case CL_WAITING:
 		client->sent_wait_notification = false;
 		statlist_remove(&pool->waiting_client_list, &client->head);
+		if (statlist_empty(&pool->waiting_client_list))
+			pool->wait_queue_nonempty_since = 0;
 		break;
 	case CL_ACTIVE:
 		statlist_remove(&pool->active_client_list, &client->head);
@@ -272,6 +274,8 @@ void change_client_state(PgSocket *client, SocketState newstate)
 	case CL_WAITING:
 	case CL_WAITING_LOGIN:
 		client->wait_start = get_cached_time();
+		if (statlist_empty(&pool->waiting_client_list))
+			pool->wait_queue_nonempty_since = client->wait_start;
 		statlist_append(&pool->waiting_client_list, &client->head);
 		break;
 	case CL_ACTIVE:
@@ -714,6 +718,7 @@ static PgPool *new_pool(PgDatabase *db, PgCredentials *user_credentials)
 
 	statlist_init(&pool->active_client_list, "active_client_list");
 	statlist_init(&pool->waiting_client_list, "waiting_client_list");
+	pool->wait_queue_nonempty_since = 0;
 	statlist_init(&pool->active_server_list, "active_server_list");
 	statlist_init(&pool->idle_server_list, "idle_server_list");
 	statlist_init(&pool->tested_server_list, "tested_server_list");

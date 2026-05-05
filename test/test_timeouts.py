@@ -458,8 +458,84 @@ def test_client_idle_timeout(bouncer):
             with pytest.raises(
                 psycopg.OperationalError,
                 match=r"client_idle_timeout|Software caused connection abort|server closed the connection unexpectedly",
-            ):
-                cur.execute("select 1")
+                ):
+                    cur.execute("select 1")
+
+
+async def test_query_wait_codel(bouncer):
+    config = f"""
+        [databases]
+        postgres = host={bouncer.pg.host} port={bouncer.pg.port}
+
+        [pgbouncer]
+        listen_addr = {bouncer.host}
+        admin_users = pgbouncer
+        auth_type = trust
+        auth_file = {bouncer.auth_path}
+        listen_port = {bouncer.port}
+        logfile = {bouncer.log_path}
+        pool_mode = statement
+        query_wait_codel_target = 1
+        query_wait_codel_interval = 2
+
+        [users]
+        puser1 = max_user_connections=1
+    """
+
+    with bouncer.run_with_config(config):
+        sleep_future = bouncer.asql(
+            "SELECT pg_sleep(6)", dbname="postgres", user="puser1"
+        )
+        _, sleep_future = await asyncio.wait([sleep_future], timeout=1)
+
+        conn_2 = await bouncer.aconn(dbname="postgres", user="puser1")
+        try:
+            with bouncer.log_contains(r"query_wait_codel"):
+                with pytest.raises(
+                    psycopg.OperationalError,
+                    match=r"query_wait_codel|server closed the connection unexpectedly",
+                ):
+                    await conn_2.execute("select 1;")
+        finally:
+            await conn_2.close()
+
+        await sleep_future.pop()
+
+
+async def test_query_wait_codel_allows_short_burst(bouncer):
+    config = f"""
+        [databases]
+        postgres = host={bouncer.pg.host} port={bouncer.pg.port}
+
+        [pgbouncer]
+        listen_addr = {bouncer.host}
+        admin_users = pgbouncer
+        auth_type = trust
+        auth_file = {bouncer.auth_path}
+        listen_port = {bouncer.port}
+        logfile = {bouncer.log_path}
+        pool_mode = statement
+        query_wait_codel_target = 1
+        query_wait_codel_interval = 10
+
+        [users]
+        puser1 = max_user_connections=1
+    """
+
+    with bouncer.run_with_config(config):
+        sleep_future = bouncer.asql(
+            "SELECT pg_sleep(3)", dbname="postgres", user="puser1"
+        )
+        _, sleep_future = await asyncio.wait([sleep_future], timeout=1)
+
+        conn_2 = await bouncer.aconn(dbname="postgres", user="puser1")
+        try:
+            cur = await conn_2.execute("select 1;")
+            assert await cur.fetchall() == [(1,)]
+        finally:
+            await conn_2.close()
+
+        await sleep_future.pop()
 
 
 async def test_server_login_retry(pg, bouncer):
