@@ -430,8 +430,10 @@ static void pool_client_maint(PgPool *pool)
 
 
 	/* force timeouts for waiting queries */
-	if (cf_query_timeout > 0 || cf_query_wait_timeout > 0) {
+	if (cf_query_timeout > 0 || cf_query_wait_timeout > 0
+	    || (cf_query_wait_codel_target > 0 && cf_query_wait_codel_interval > 0)) {
 		statlist_for_each_safe(item, &pool->waiting_client_list, tmp) {
+			usec_t sojourn;
 			client = container_of(item, PgSocket, head);
 			Assert(client->state == CL_WAITING || client->state == CL_WAITING_LOGIN);
 			if (client->query_start == 0) {
@@ -440,11 +442,18 @@ static void pool_client_maint(PgPool *pool)
 			} else {
 				age = now - client->query_start;
 			}
+			sojourn = now - client->wait_start;
 
 			if (cf_shutdown == SHUTDOWN_WAIT_FOR_SERVERS) {
 				disconnect_client(client, true, "server shutting down");
 			} else if (cf_query_timeout > 0 && age > cf_query_timeout) {
 				disconnect_client(client, true, "query_timeout");
+			} else if (cf_query_wait_codel_target > 0
+				   && cf_query_wait_codel_interval > 0
+				   && pool->wait_queue_nonempty_since > 0
+				   && now - pool->wait_queue_nonempty_since >= cf_query_wait_codel_interval
+				   && sojourn > cf_query_wait_codel_target) {
+				disconnect_client(client, true, "query_wait_codel");
 			} else if (cf_query_wait_timeout > 0 && age > cf_query_wait_timeout) {
 				disconnect_client(client, true, "query_wait_timeout");
 			}
