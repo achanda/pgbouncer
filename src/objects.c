@@ -33,6 +33,8 @@ STATLIST(database_list);
 STATLIST(pool_list);
 STATLIST(peer_list);
 STATLIST(peer_pool_list);
+/* active pools touched in current loop iteration */
+STATLIST(active_pool_list);
 
 /* All locally defined users (in auth_file) are kept here. */
 struct AATree user_tree;
@@ -707,6 +709,7 @@ static PgPool *new_pool(PgDatabase *db, PgCredentials *user_credentials)
 
 	list_init(&pool->head);
 	list_init(&pool->map_head);
+	list_init(&pool->active_head);
 	pool->orig_vars.var_list = slab_alloc(var_list_cache);
 
 	pool->user_credentials = user_credentials;
@@ -750,6 +753,7 @@ static PgPool *new_peer_pool(PgDatabase *db)
 
 	list_init(&pool->head);
 	list_init(&pool->map_head);
+	list_init(&pool->active_head);
 	pool->orig_vars.var_list = slab_alloc(var_list_cache);
 
 	pool->db = db;
@@ -775,11 +779,16 @@ PgPool *get_pool(PgDatabase *db, PgCredentials *user_credentials)
 
 	list_for_each(item, &user_credentials->global_user->pool_list) {
 		pool = container_of(item, PgPool, map_head);
-		if (pool->db == db)
+		if (pool->db == db) {
+			mark_pool_active(pool);
 			return pool;
+		}
 	}
 
-	return new_pool(db, user_credentials);
+	pool = new_pool(db, user_credentials);
+	if (pool)
+		mark_pool_active(pool);
+	return pool;
 }
 
 /* find pool object for the peer */
@@ -790,6 +799,8 @@ PgPool *get_peer_pool(PgDatabase *db)
 	if (!db->pool) {
 		db->pool = new_peer_pool(db);
 	}
+	if (db->pool)
+		mark_pool_active(db->pool);
 	return db->pool;
 }
 
@@ -837,6 +848,7 @@ void activate_client(PgSocket *client)
 	client->pool->stats.wait_time += (get_cached_time() - client->wait_start);
 
 	slog_debug(client, "activate_client");
+	mark_pool_active(client->pool);
 	change_client_state(client, CL_ACTIVE);
 	sbuf_continue(&client->sbuf);
 }
@@ -1861,6 +1873,7 @@ void launch_new_connection(PgPool *pool, bool evict_if_needed)
 	PgSocket *server;
 	int max;
 
+	mark_pool_active(pool);
 	log_debug("launch_new_connection: start");
 	/*
 	 * Allow only a single connection attempt at a time.
@@ -2519,6 +2532,16 @@ static void for_each_server_filtered(PgPool *pool, void (*func)(PgSocket *sk), b
 static void tag_dirty(PgSocket *sk)
 {
 	sk->close_needed = true;
+}
+
+/* Mark pool as active for current loop iteration */
+void mark_pool_active(PgPool *pool)
+{
+	if (!pool || pool->db->admin)
+		return;
+	/* Only add if not already in the list */
+	if (list_empty(&pool->active_head))
+		statlist_append(&active_pool_list, &pool->active_head);
 }
 
 void tag_pool_dirty(PgPool *pool)

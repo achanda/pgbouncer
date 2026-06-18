@@ -27,6 +27,9 @@
 /* do full maintenance 3x per second */
 static struct timeval full_maint_period = {0, USEC / 3};
 static struct event full_maint_ev;
+/* per-loop maintenance every 10ms (100x per second) */
+static struct timeval per_loop_maint_period = {0, USEC / 100};
+static struct event per_loop_maint_ev;
 extern bool any_user_level_server_timeout_set;
 extern bool any_user_level_client_timeout_set;
 
@@ -332,11 +335,12 @@ static int per_loop_wait_close(PgPool *pool)
 }
 
 /*
- * this function is called for each event loop.
+ * this function is called periodically via timer.
+ * Only processes pools that were active in the current loop iteration.
  */
 void per_loop_maint(void)
 {
-	struct List *item;
+	struct List *item, *tmp;
 	PgPool *pool;
 	int active_count = 0;
 	int waiting_count = 0;
@@ -350,30 +354,54 @@ void per_loop_maint(void)
 			force_suspend = true;
 	}
 
-	statlist_for_each(item, &pool_list) {
-		pool = container_of(item, PgPool, head);
-		if (pool->db->admin)
-			continue;
-		switch (cf_pause_mode) {
-		case P_NONE:
+	/* In pause/suspend mode, we need to check all pools */
+	if (cf_pause_mode != P_NONE) {
+		statlist_for_each(item, &pool_list) {
+			pool = container_of(item, PgPool, head);
+			if (pool->db->admin)
+				continue;
+			switch (cf_pause_mode) {
+			case P_PAUSE:
+				active_count += per_loop_pause(pool);
+				break;
+			case P_SUSPEND:
+				active_count += per_loop_suspend(pool, force_suspend);
+				break;
+			}
+
+			if (pool->db->db_wait_close) {
+				partial_wait = true;
+				waiting_count += per_loop_wait_close(pool);
+			}
+		}
+	} else {
+		/* Normal mode: only process active pools */
+		statlist_for_each_safe(item, &active_pool_list, tmp) {
+			pool = container_of(item, PgPool, active_head);
+			if (pool->db->admin)
+				continue;
 			if (pool->db->db_paused) {
 				partial_pause = true;
 				active_count += per_loop_pause(pool);
 			} else {
 				per_loop_activate(pool);
 			}
-			break;
-		case P_PAUSE:
-			active_count += per_loop_pause(pool);
-			break;
-		case P_SUSPEND:
-			active_count += per_loop_suspend(pool, force_suspend);
-			break;
-		}
 
-		if (pool->db->db_wait_close) {
-			partial_wait = true;
-			waiting_count += per_loop_wait_close(pool);
+			if (pool->db->db_wait_close) {
+				partial_wait = true;
+				waiting_count += per_loop_wait_close(pool);
+			}
+
+			/* Remove from active list, but keep it active if it still has work to do */
+			statlist_remove(&active_pool_list, &pool->active_head);
+
+			/* Re-add to active list if pool still needs maintenance */
+			if (!statlist_empty(&pool->waiting_client_list) ||
+			    !statlist_empty(&pool->waiting_cancel_req_list) ||
+			    !statlist_empty(&pool->used_server_list) ||
+			    !statlist_empty(&pool->tested_server_list)) {
+				mark_pool_active(pool);
+			}
 		}
 	}
 
@@ -857,11 +885,21 @@ static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
 }
 
 /* first-time initialization */
+static void per_loop_maint_timer(evutil_socket_t sock, short flags, void *arg)
+{
+	per_loop_maint();
+}
+
 void janitor_setup(void)
 {
-	/* launch maintenance */
+	/* launch full maintenance */
 	event_assign(&full_maint_ev, pgb_event_base, -1, EV_PERSIST, do_full_maint, NULL);
 	if (event_add(&full_maint_ev, &full_maint_period) < 0)
+		log_warning("event_add failed: %s", strerror(errno));
+
+	/* launch per-loop maintenance timer */
+	event_assign(&per_loop_maint_ev, pgb_event_base, -1, EV_PERSIST, per_loop_maint_timer, NULL);
+	if (event_add(&per_loop_maint_ev, &per_loop_maint_period) < 0)
 		log_warning("event_add failed: %s", strerror(errno));
 }
 
@@ -887,6 +925,8 @@ void kill_pool(PgPool *pool)
 
 	list_del(&pool->map_head);
 	statlist_remove(&pool_list, &pool->head);
+	if (!list_empty(&pool->active_head))
+		statlist_remove(&active_pool_list, &pool->active_head);
 	varcache_clean(&pool->orig_vars);
 	slab_free(var_list_cache, pool->orig_vars.var_list);
 	slab_free(pool_cache, pool);
@@ -905,6 +945,8 @@ void kill_peer_pool(PgPool *pool)
 
 	list_del(&pool->map_head);
 	statlist_remove(&peer_pool_list, &pool->head);
+	if (!list_empty(&pool->active_head))
+		statlist_remove(&active_pool_list, &pool->active_head);
 	varcache_clean(&pool->orig_vars);
 	slab_free(var_list_cache, pool->orig_vars.var_list);
 	slab_free(peer_pool_cache, pool);
