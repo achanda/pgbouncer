@@ -188,6 +188,15 @@ int tls_connect_fds(struct tls *ctx, int fd_read, int fd_write,
 	if (tls_configure_keypair(ctx, ctx->ssl_ctx, ctx->config->keypair, 0) != 0)
 		goto err;
 
+	/*
+	 * Enable in-memory session caching for TLS resumption on client side.
+	 */
+	SSL_CTX_set_session_cache_mode(ctx->ssl_ctx,
+				       SSL_SESS_CACHE_CLIENT |
+				       SSL_SESS_CACHE_NO_INTERNAL_STORE);
+	SSL_CTX_sess_set_cache_size(ctx->ssl_ctx, 1024);
+	SSL_CTX_set_timeout(ctx->ssl_ctx, 300);
+
 	if (ctx->config->verify_name) {
 		if (servername == NULL) {
 			tls_set_errorx(ctx, "server name not specified");
