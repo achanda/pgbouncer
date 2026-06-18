@@ -366,6 +366,36 @@ void rescue_timers(void)
 	}
 }
 
+/*
+ * Check if the socket is still connected by polling for hang-up.
+ * Used by client_connection_check_interval to detect dead clients
+ * during long-running server operations (similar to PostgreSQL's
+ * client_connection_check_interval).
+ */
+bool client_socket_still_connected(int fd)
+{
+	struct pollfd pfd;
+	int r;
+
+	if (fd < 0)
+		return true;
+
+	pfd.fd = fd;
+	pfd.events = 0;
+	pfd.revents = 0;
+
+	r = poll(&pfd, 1, 0);
+	if (r < 0)
+		return true;		/* assume connected on error (e.g. EINTR) */
+	if (r == 0)
+		return true;		/* no events = no hang up */
+
+	/* Connection is closed if we see hang up or error */
+	if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+		return false;
+
+	return true;
+}
 
 /*
  * PgAddr operations

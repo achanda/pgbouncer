@@ -24,11 +24,16 @@
 
 #include <usual/slab.h>
 
+#include "util.h"
+
 /* do full maintenance 3x per second */
 static struct timeval full_maint_period = {0, USEC / 3};
 static struct event full_maint_ev;
 extern bool any_user_level_server_timeout_set;
 extern bool any_user_level_client_timeout_set;
+
+/* client_connection_check_interval: periodic check that active clients are still connected */
+static struct event client_connection_check_ev;
 
 /* close all sockets in server list */
 static void close_server_list(struct StatList *sk_list, const char *reason)
@@ -856,13 +861,64 @@ static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
 	adns_zone_cache_maint(adns);
 }
 
+/*
+ * Periodic check that active clients (those with a server, query in progress)
+ * are still connected. Disconnects clients whose socket has been closed by
+ * the peer (e.g. POLLHUP). Similar to PostgreSQL's client_connection_check_interval.
+ */
+static void client_connection_check_cb(evutil_socket_t sock, short flags, void *arg)
+{
+	struct List *pool_item, *client_item, *client_tmp;
+	PgPool *pool;
+	PgSocket *client;
+	struct timeval interval;
+
+	(void) sock;
+	(void) flags;
+	(void) arg;
+
+	if (cf_client_connection_check_interval <= 0)
+		return;
+
+	statlist_for_each(pool_item, &pool_list) {
+		pool = container_of(pool_item, PgPool, head);
+		if (pool->db->admin)
+			continue;
+
+		statlist_for_each_safe(client_item, &pool->active_client_list, client_tmp) {
+			client = container_of(client_item, PgSocket, head);
+			if (!client_socket_still_connected(client->sbuf.sock)) {
+				disconnect_client(client, false, "client connection lost");
+			}
+		}
+	}
+
+	/* Re-arm timer for next run */
+	interval.tv_sec = cf_client_connection_check_interval / 1000;
+	interval.tv_usec = (cf_client_connection_check_interval % 1000) * 1000;
+	evtimer_assign(&client_connection_check_ev, pgb_event_base,
+		       client_connection_check_cb, NULL);
+	safe_evtimer_add(&client_connection_check_ev, &interval);
+}
+
 /* first-time initialization */
 void janitor_setup(void)
 {
+	struct timeval interval;
+
 	/* launch maintenance */
 	event_assign(&full_maint_ev, pgb_event_base, -1, EV_PERSIST, do_full_maint, NULL);
 	if (event_add(&full_maint_ev, &full_maint_period) < 0)
 		log_warning("event_add failed: %s", strerror(errno));
+
+	/* client_connection_check_interval: optional periodic client liveness check */
+	if (cf_client_connection_check_interval > 0) {
+		interval.tv_sec = cf_client_connection_check_interval / 1000;
+		interval.tv_usec = (cf_client_connection_check_interval % 1000) * 1000;
+		evtimer_assign(&client_connection_check_ev, pgb_event_base,
+			       client_connection_check_cb, NULL);
+		safe_evtimer_add(&client_connection_check_ev, &interval);
+	}
 }
 
 void kill_pool(PgPool *pool)
