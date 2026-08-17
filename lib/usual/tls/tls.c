@@ -536,8 +536,9 @@ void usual_tls_free(struct tls *ctx)
 
 void tls_reset(struct tls *ctx)
 {
-	SSL_CTX_free(ctx->ssl_ctx);
 	SSL_free(ctx->ssl_conn);
+	if (!ctx->shared_ssl_ctx)
+		SSL_CTX_free(ctx->ssl_ctx);
 	X509_free(ctx->ssl_peer_cert);
 
 	ctx->ssl_conn = NULL;
@@ -549,6 +550,8 @@ void tls_reset(struct tls *ctx)
 
 	free(ctx->servername);
 	ctx->servername = NULL;
+	free(ctx->session_cache_key);
+	ctx->session_cache_key = NULL;
 
 	free(ctx->error.msg);
 	ctx->error.msg = NULL;
@@ -557,6 +560,9 @@ void tls_reset(struct tls *ctx)
 	tls_free_conninfo(ctx->conninfo);
 	free(ctx->conninfo);
 	ctx->conninfo = NULL;
+	tls_client_runtime_unref(ctx->client_runtime);
+	ctx->client_runtime = NULL;
+	ctx->shared_ssl_ctx = false;
 
 	ctx->used_dh_bits = 0;
 	ctx->used_ecdh_nid = 0;
@@ -684,6 +690,8 @@ ssize_t tls_read(struct tls *ctx, void *buf, size_t buflen)
 
 	ERR_clear_error();
 	if ((ssl_ret = SSL_read(ctx->ssl_conn, buf, buflen)) > 0) {
+		if ((ctx->flags & TLS_CLIENT) != 0)
+			tls_client_cache_session(ctx);
 		rv = (ssize_t)ssl_ret;
 		goto out;
 	}
@@ -717,6 +725,8 @@ ssize_t tls_write(struct tls *ctx, const void *buf, size_t buflen)
 
 	ERR_clear_error();
 	if ((ssl_ret = SSL_write(ctx->ssl_conn, buf, buflen)) > 0) {
+		if ((ctx->flags & TLS_CLIENT) != 0)
+			tls_client_cache_session(ctx);
 		rv = (ssize_t)ssl_ret;
 		goto out;
 	}
@@ -738,6 +748,9 @@ int tls_close(struct tls *ctx)
 		rv = -1;
 		goto out;
 	}
+
+	if ((ctx->flags & TLS_CLIENT) != 0)
+		tls_client_cache_session(ctx);
 
 	if (ctx->ssl_conn != NULL) {
 		ERR_clear_error();
@@ -825,6 +838,8 @@ bool tls_config_equal(struct tls_config *tc1, struct tls_config *tc2)
 	if (!tls_mem_equal(tc1->ca_mem, tc2->ca_mem, tc1->ca_len, tc2->ca_len))
 		return false;
 	if (!strcmpeq(tc1->ciphers, tc2->ciphers))
+		return false;
+	if (!strcmpeq(tc1->cipher_suites, tc2->cipher_suites))
 		return false;
 	if (tc1->ciphers_server != tc2->ciphers_server)
 		return false;
