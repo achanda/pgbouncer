@@ -458,6 +458,11 @@ if test "$tls_support" = "auto" -o "$tls_support" = "libssl"; then
     [ AC_MSG_ERROR([not found]) ])
   dnl check LibreSSL-only APIs
   AC_CHECK_FUNCS(SSL_CTX_use_certificate_chain_mem SSL_CTX_load_verify_mem asn1_time_parse)
+  AC_LINK_IFELSE([
+    AC_LANG_PROGRAM([[#include <openssl/ssl.h>]],
+                    [[return SSL_CTX_set1_tls13_ciphers(NULL, NULL, NULL, 0);]])],
+    [AC_DEFINE(HAVE_SSL_CTX_SET1_TLS13_CIPHERS, 1,
+               [Define if SSL_CTX_set1_tls13_ciphers is available.])])
   CPPFLAGS="$tmp_CPPFLAGS"
   LDFLAGS="$tmp_LDFLAGS"
   LIBS="$tmp_LIBS"

@@ -415,6 +415,64 @@ static int get_max_ssl_version(uint32_t protocols)
 }
 #endif
 
+/* Configure TLS 1.3 suites without silently ignoring a cipher restriction. */
+static int tls_configure_ciphersuites(struct tls *ctx, const char *ciphers)
+{
+#if defined(OPENSSL_IS_BORINGSSL) && defined(HAVE_SSL_CTX_SET1_TLS13_CIPHERS)
+	static const struct {
+		const char *name;
+		uint16_t id;
+	} suites[] = {
+		{ TLS1_3_RFC_AES_256_GCM_SHA384, (uint16_t)TLS1_3_CK_AES_256_GCM_SHA384 },
+		{ TLS1_3_RFC_CHACHA20_POLY1305_SHA256, (uint16_t)TLS1_3_CK_CHACHA20_POLY1305_SHA256 },
+		{ TLS1_3_RFC_AES_128_GCM_SHA256, (uint16_t)TLS1_3_CK_AES_128_GCM_SHA256 },
+		{ "TLS_AES_128_CCM_8_SHA256", 0x1305 },
+		{ "TLS_AES_128_CCM_SHA256", 0x1304 },
+	};
+	uint16_t ids[ARRAY_NELEM(suites)];
+	size_t count = 0, i, j, len;
+	const char *name, *end;
+#endif
+
+	if (ciphers == NULL || ciphers[0] == '\0')
+		return 0;
+
+#if defined(OPENSSL_IS_BORINGSSL) && defined(HAVE_SSL_CTX_SET1_TLS13_CIPHERS)
+	for (name = ciphers; ; name = end + 1) {
+		end = strchr(name, ':');
+		len = end ? (size_t)(end - name) : strlen(name);
+		for (i = 0; i < ARRAY_NELEM(suites); i++) {
+			if (strlen(suites[i].name) == len &&
+			    memcmp(name, suites[i].name, len) == 0)
+				break;
+		}
+		if (i == ARRAY_NELEM(suites)) {
+			tls_set_errorx(ctx, "failed to set the TLSv1.3 cipher suites: %s", ciphers);
+			return -1;
+		}
+		/* Preserve preference order, keeping only the first occurrence. */
+		for (j = 0; j < count; j++) {
+			if (ids[j] == suites[i].id)
+				break;
+		}
+		if (j == count)
+			ids[count++] = suites[i].id;
+		if (end == NULL)
+			break;
+	}
+	if (SSL_CTX_set1_tls13_ciphers(ctx->ssl_ctx, ids, NULL, count) == 1)
+		return 0;
+#elif defined(OPENSSL_IS_BORINGSSL)
+	tls_set_errorx(ctx, "custom TLSv1.3 cipher suites are unsupported by this BoringSSL build");
+	return -1;
+#else
+	if (SSL_CTX_set_ciphersuites(ctx->ssl_ctx, ciphers) == 1)
+		return 0;
+#endif
+	tls_set_errorx(ctx, "failed to set the TLSv1.3 cipher suites");
+	return -1;
+}
+
 int tls_configure_ssl(struct tls *ctx)
 {
 	SSL_CTX_set_mode(ctx->ssl_ctx, SSL_MODE_ENABLE_PARTIAL_WRITE);
@@ -467,13 +525,9 @@ int tls_configure_ssl(struct tls *ctx)
 	 * Set up the allowed cipher suites for TLSv1.3. If the value is an empty
 	 * string or NULL we leave the allowed suites to be the OpenSSL default value.
 	 */
-	if (ctx->config->protocols & TLS_PROTOCOL_TLSv1_3 &&
-	    ctx->config->cipher_suites != NULL &&
-	    strlen(ctx->config->cipher_suites) > 0) {
-		if (SSL_CTX_set_ciphersuites(ctx->ssl_ctx, ctx->config->cipher_suites) != 1) {
-			tls_set_errorx(ctx, "failed to set the TLSv1.3 cipher suites");
+	if (ctx->config->protocols & TLS_PROTOCOL_TLSv1_3) {
+		if (tls_configure_ciphersuites(ctx, ctx->config->cipher_suites) != 0)
 			goto err;
-		}
 	}
 	SSL_CTX_set_info_callback(ctx->ssl_ctx, tls_info_callback);
 
