@@ -101,6 +101,7 @@ int tls_configure_server(struct tls *ctx)
 		tls_set_errorx(ctx, "ssl context failure");
 		goto err;
 	}
+	SSL_CTX_set_session_cache_mode(ctx->ssl_ctx, SSL_SESS_CACHE_SERVER);
 	SSL_CTX_set_alpn_select_cb(ctx->ssl_ctx, alpn_cb, NULL);
 
 	if (tls_configure_ssl(ctx) != 0)
