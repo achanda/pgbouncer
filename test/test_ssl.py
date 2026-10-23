@@ -463,7 +463,15 @@ def test_client_ssl_set_ciphers_for_tls_v1_3(bouncer_tls, cert_dir):
     bouncer_tls.write_ini("client_tls_protocols=tlsv1.3")
     bouncer_tls.write_ini("client_tls13_ciphers=TLS_CHACHA20_POLY1305_SHA256")
 
-    bouncer_tls.admin("reload")
+    try:
+        bouncer_tls.admin("reload")
+    except psycopg.Error:
+        unsupported = (
+            "custom TLSv1.3 cipher suites are unsupported by this BoringSSL build"
+        )
+        if unsupported not in bouncer_tls.log_path.read_text():
+            raise
+        pytest.skip("BoringSSL lacks the TLS 1.3 cipher configuration API")
 
     with bouncer_tls.log_contains(r"tls=TLSv1.3/TLS_CHACHA20_POLY1305_SHA256"):
         bouncer_tls.psql_test(host="localhost", sslmode="require")

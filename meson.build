@@ -338,6 +338,15 @@ if openssl.found()
               cc.has_function(func, dependencies: openssl) ? 1 : false)
   endforeach
 
+  cdata.set('HAVE_SSL_CTX_SET1_TLS13_CIPHERS',
+            cc.links('''
+              #include <openssl/ssl.h>
+              int main(void) {
+                return SSL_CTX_set1_tls13_ciphers(NULL, NULL, NULL, 0);
+              }
+            ''', dependencies: openssl,
+            name: 'SSL_CTX_set1_tls13_ciphers') ? 1 : false)
+
   # Pick a default root CA bundle, unless one was given explicitly.
   cafile = get_option('root_ca_file')
   if cafile == ''
