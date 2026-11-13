@@ -9,7 +9,13 @@ SUBLOC = test
 DIST_SUBDIRS = ssl
 
 
-noinst_PROGRAMS = hba_test
+noinst_PROGRAMS = hba_test tls_ciphers_test
+tls_ciphers_test_CPPFLAGS = -I../include $(LIBEVENT_CFLAGS) $(TLS_CPPFLAGS)
+tls_ciphers_test_LDFLAGS = $(TLS_LDFLAGS)
+tls_ciphers_test_LDADD = $(LIBEVENT_LIBS) $(TLS_LIBS)
+tls_ciphers_test_SOURCES = tls_ciphers_test.c
+tls_ciphers_test_EMBED_LIBUSUAL = 1
+
 hba_test_CPPFLAGS = -I../include $(LIBEVENT_CFLAGS)
 hba_test_LDADD = $(LIBEVENT_LIBS) $(TLS_LIBS)
 hba_test_CFLAGS = -O0
@@ -31,3 +37,4 @@ include ../lib/mk/antimake.mk
 
 check: all
 	./hba_test
+	./tls_ciphers_test

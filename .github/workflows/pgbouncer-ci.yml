@@ -58,6 +58,9 @@ jobs:
             build_system: meson
             meson_args: "-Dcares=enabled -Dpam=enabled -Dldap=enabled"
             dist: "yes"
+          - name: boringssl
+            build_system: meson
+            meson_args: "-Dopenssl=enabled -Dcares=enabled -Dpam=enabled -Dldap=enabled"
           - name: no-evdns-no-openssl
             build_system: meson
             meson_args: "-Dcares=disabled -Devdns=false -Dopenssl=disabled"
@@ -107,6 +110,30 @@ jobs:
           fi
           python3 -m venv "$HOME/venv"
           "$HOME/venv/bin/pip" install .
+      - name: Build BoringSSL
+        if: ${{ matrix.name == 'boringssl' }}
+        env:
+          BORINGSSL_VERSION: "0.20260813.0"
+        run: |
+          set -eu
+          sudo apt-get -y --no-install-recommends install cmake g++
+          git init "$RUNNER_TEMP/boringssl"
+          git -C "$RUNNER_TEMP/boringssl" remote add origin https://github.com/google/boringssl.git
+          git -C "$RUNNER_TEMP/boringssl" fetch --depth 1 origin "refs/tags/$BORINGSSL_VERSION"
+          git -C "$RUNNER_TEMP/boringssl" checkout --detach FETCH_HEAD
+          cmake -S "$RUNNER_TEMP/boringssl" -B "$RUNNER_TEMP/boringssl-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build "$RUNNER_TEMP/boringssl-build" --target ssl crypto --parallel 4
+          # Use static libraries so PostgreSQL and Python keep their system OpenSSL.
+          mkdir -p "$RUNNER_TEMP/boringssl-pkgconfig"
+          cat > "$RUNNER_TEMP/boringssl-pkgconfig/openssl.pc" <<EOF
+          Name: BoringSSL
+          Description: BoringSSL for the PgBouncer CI build
+          Version: 1.0.0
+          Libs: $RUNNER_TEMP/boringssl-build/libssl.a $RUNNER_TEMP/boringssl-build/libcrypto.a -lstdc++ -lpthread
+          Cflags: -I$RUNNER_TEMP/boringssl/include
+          EOF
+          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/boringssl-pkgconfig" >> "$GITHUB_ENV"
       - name: Build
         run: |
           set -e
@@ -115,6 +142,9 @@ jobs:
           [ -n "$CFLAGS_OVERRIDE" ] && export CFLAGS="$CFLAGS_OVERRIDE"
           [ "${USE_SCAN_BUILD:-}" = "yes" ] && export SCANBUILD="scan-build"
           sh ci/run.sh build "$BUILD_SYSTEM"
+          if [ "${{ matrix.name }}" = boringssl ]; then
+            build/pgbouncer --version | grep -q '^tls: BoringSSL'
+          fi
       - name: Test
         run: |
           set -e
