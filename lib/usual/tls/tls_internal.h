@@ -46,6 +46,18 @@ struct tls_keypair {
 	size_t key_len;
 };
 
+struct tls_client_session {
+	struct tls_client_session *next;
+	char *cache_key;
+	SSL_SESSION *session;
+};
+
+struct tls_client_runtime {
+	SSL_CTX *ssl_ctx;
+	struct tls_client_session *sessions;
+	unsigned int refcount;
+};
+
 struct tls_config {
 	struct tls_error error;
 
@@ -68,6 +80,7 @@ struct tls_config {
 	int verify_depth;
 	int verify_name;
 	int verify_time;
+	struct tls_client_runtime *client_runtime;
 };
 
 struct tls_conninfo {
@@ -108,6 +121,9 @@ struct tls {
 	SSL_CTX *ssl_ctx;
 	X509 *ssl_peer_cert;
 	struct tls_conninfo *conninfo;
+	struct tls_client_runtime *client_runtime;
+	char *session_cache_key;
+	bool shared_ssl_ctx;
 
 	int used_dh_bits;
 	int used_ecdh_nid;
@@ -139,6 +155,14 @@ int tls_configure_ssl_verify(struct tls *ctx, int verify);
 int tls_handshake_client(struct tls *ctx);
 int tls_handshake_server(struct tls *ctx);
 int tls_host_port(const char *hostport, char **host, char **port);
+void tls_client_cache_session(struct tls *ctx);
+void tls_client_runtime_ref(struct tls_client_runtime *runtime);
+void tls_client_runtime_unref(struct tls_client_runtime *runtime);
+SSL_SESSION *tls_client_runtime_get_session(struct tls_client_runtime *runtime,
+					    const char *cache_key);
+bool tls_client_runtime_store_session(struct tls_client_runtime *runtime,
+				      const char *cache_key,
+				      SSL_SESSION *session);
 
 int tls_error_set(struct tls_error *error, const char *fmt, ...)
 _PRINTF(2, 3)

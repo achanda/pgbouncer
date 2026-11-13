@@ -178,6 +178,7 @@ ssize_t tls_get_connection_info(struct tls *ctx, char *buf, size_t buflen)
 	SSL *conn = ctx->ssl_conn;
 	const char *ocsp_pfx = "", *ocsp_info = "";
 	const char *proto = "-", *cipher = "-";
+	const char *resumed = "";
 	char dh[64];
 	int used_dh_bits = ctx->used_dh_bits, used_ecdh_nid = ctx->used_ecdh_nid;
 	const SSL_CIPHER *ciph_obj = NULL;
@@ -186,11 +187,14 @@ ssize_t tls_get_connection_info(struct tls *ctx, char *buf, size_t buflen)
 
 	if (conn != NULL) {
 		proto = SSL_get_version(conn);
-		if (strcmp(proto, "TLSv1.3") == 0)
+		if (strcmp(proto, "TLSv1.3") == 0) {
 			cipher = SSL_get_cipher_list(conn, 0);
-		else
+		} else {
 			cipher = SSL_get_cipher(conn);
+		}
 		ciph_obj = SSL_get_current_cipher(conn);
+		if (SSL_session_reused(conn))
+			resumed = "/resumed";
 
 #ifdef SSL_get_server_tmp_key
 		if (ctx->flags & TLS_CLIENT) {
@@ -233,7 +237,8 @@ ssize_t tls_get_connection_info(struct tls *ctx, char *buf, size_t buflen)
 		ocsp_pfx = "/OCSP=";
 	}
 
-	return snprintf(buf, buflen, "%s/%s%s%s%s", proto, cipher, dh, ocsp_pfx, ocsp_info);
+	return snprintf(buf, buflen, "%s/%s%s%s%s%s", proto, cipher, dh,
+			ocsp_pfx, ocsp_info, resumed);
 }
 
 #endif /* USUAL_LIBSSL_FOR_TLS */

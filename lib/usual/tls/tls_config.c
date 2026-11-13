@@ -162,6 +162,8 @@ void tls_config_free(struct tls_config *config)
 	free((char *)config->ca_path);
 	free((char *)config->ciphers);
 	free((char *)config->cipher_suites);
+	tls_client_runtime_unref(config->client_runtime);
+	config->client_runtime = NULL;
 
 	free(config);
 }

@@ -731,5 +731,10 @@ void tls_cert_free(struct tls_cert *cert)
 {
 }
 
+bool tls_config_has_shared_client_context(struct tls_config *_config)
+{
+	return false;
+}
+
 
 #endif /* !USUAL_LIBSSL_FOR_TLS */
