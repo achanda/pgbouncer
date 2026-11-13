@@ -155,6 +155,15 @@ int tls_configure_server(struct tls *ctx)
 		goto err;
 	}
 
+	/*
+	 * Enable in-memory session caching for TLS resumption.
+	 */
+	SSL_CTX_set_session_cache_mode(ctx->ssl_ctx,
+				       SSL_SESS_CACHE_SERVER |
+				       SSL_SESS_CACHE_NO_INTERNAL_STORE);
+	SSL_CTX_sess_set_cache_size(ctx->ssl_ctx, 1024);
+	SSL_CTX_set_timeout(ctx->ssl_ctx, 300);
+
 	cert_stack = SSL_load_client_CA_file(ctx->config->ca_file);
 	SSL_CTX_set_client_CA_list(ctx->ssl_ctx, cert_stack);
 
